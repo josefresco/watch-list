@@ -479,6 +479,9 @@
           <button class="pill" data-filter="streamable" onclick="setFilter('streamable')">Stream</button>
           <button class="pill" data-filter="free" onclick="setFilter('free')">Free</button>
         </div>
+        <select id="genreSelect" onchange="setGenreFilter()" style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:13px;padding:4px 8px;cursor:pointer;outline:none;">
+          <option value="">All Genres</option>
+        </select>
         <select id="sortSelect" onchange="applySort()" style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:13px;padding:4px 8px;cursor:pointer;outline:none;">
           <option value="title-asc" selected>Title: A–Z</option>
           <option value="added-desc">Added: Newest</option>
@@ -521,15 +524,37 @@
     <div id="searchControls" style="display:none;margin-bottom:16px;text-align:center">
       <button class="btn secondary" onclick="clearSearch()">Clear Results</button>
     </div>
+    <div id="genreQuickSearch" style="margin-bottom:20px">
+      <div style="font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:10px">Browse by Genre</div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px">
+        <button class="pill" onclick="browseGenre(28,'Action')">Action</button>
+        <button class="pill" onclick="browseGenre(12,'Adventure')">Adventure</button>
+        <button class="pill" onclick="browseGenre(16,'Animation')">Animation</button>
+        <button class="pill" onclick="browseGenre(35,'Comedy')">Comedy</button>
+        <button class="pill" onclick="browseGenre(80,'Crime')">Crime</button>
+        <button class="pill" onclick="browseGenre(99,'Documentary')">Documentary</button>
+        <button class="pill" onclick="browseGenre(18,'Drama')">Drama</button>
+        <button class="pill" onclick="browseGenre(14,'Fantasy')">Fantasy</button>
+        <button class="pill" onclick="browseGenre(27,'Horror')">Horror</button>
+        <button class="pill" onclick="browseGenre(9648,'Mystery')">Mystery</button>
+        <button class="pill" onclick="browseGenre(10749,'Romance')">Romance</button>
+        <button class="pill" onclick="browseGenre(878,'Sci-Fi')">Sci-Fi</button>
+        <button class="pill" onclick="browseGenre(53,'Thriller')">Thriller</button>
+        <button class="pill" onclick="browseGenre(37,'Western')">Western</button>
+      </div>
+    </div>
     <div id="trendingSection">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
-        <div style="font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Trending This Week</div>
+        <div style="font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px" id="trendingLabel">Trending This Week</div>
         <div class="view-toggle">
           <button class="view-btn active" id="sr-grid-btn" onclick="setView('search','grid')" title="Grid">⊞</button>
           <button class="view-btn" id="sr-list-btn" onclick="setView('search','list')" title="List">≡</button>
         </div>
       </div>
       <div id="trendingGrid"></div>
+      <div id="loadMoreWrapper" style="display:none;text-align:center;padding:20px 0">
+        <button class="btn secondary" id="loadMoreBtn" onclick="loadMoreTrending()">Load 20 More</button>
+      </div>
     </div>
     <div id="searchGrid"></div>
   </section>
@@ -645,12 +670,43 @@
     providersCache: {},
     filter: "all",
     sort: "title-asc",
+    genreFilter: "",
     view: { watchlist: "grid", search: "grid", adult: "grid" },
     adultUnlocked: false,
+    trendingMovies: [],
+    trendingPage: 0,
+    trendingTotalPages: 1,
+    trendingGenreId: null,
   };
 
   // ── API ──────────────────────────────────────────────────────────────────
+  const apiCache = new Map(); // path -> { data, expires }
+
+  const CACHE_TTL = {
+    "/genre/movie/list": 24 * 60 * 60 * 1000,  // 24h — rarely changes
+    "/trending":         30 * 60 * 1000,         // 30m
+    "/discover":        30 * 60 * 1000,          // 30m
+    "/search":          10 * 60 * 1000,          // 10m
+    "/movie":           60 * 60 * 1000,          // 1h (providers, credits, etc.)
+  };
+
+  function cacheTTL(path) {
+    for (const [prefix, ttl] of Object.entries(CACHE_TTL)) {
+      if (path.startsWith(prefix)) return ttl;
+    }
+    return 0; // don't cache anything else
+  }
+
   async function api(path, options = {}) {
+    const isWrite = options.method && options.method !== "GET";
+    const ttl = isWrite ? 0 : cacheTTL(path);
+
+    if (ttl > 0 && apiCache.has(path)) {
+      const entry = apiCache.get(path);
+      if (Date.now() < entry.expires) return entry.data;
+      apiCache.delete(path);
+    }
+
     const sep = path.includes("?") ? "&" : "?";
     const url = `${BASE}${path}${sep}api_key=${state.apiKey}&session_id=${state.sessionId}`;
     const res = await fetch(url, options);
@@ -658,7 +714,10 @@
       const err = await res.json().catch(() => ({}));
       throw new Error(err.status_message || `HTTP ${res.status}`);
     }
-    return res.json();
+    const data = await res.json();
+
+    if (ttl > 0) apiCache.set(path, { data, expires: Date.now() + ttl });
+    return data;
   }
 
   async function getAccountId() {
@@ -694,8 +753,15 @@
   }
 
   // ── Render ───────────────────────────────────────────────────────────────
+  const ESC_MAP = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+
+  // TMDB text goes into innerHTML and attributes, so escape it first
+  function esc(value) {
+    return String(value ?? "").replace(/[&<>"']/g, c => ESC_MAP[c]);
+  }
+
   function posterImg(path, title) {
-    if (path) return `<img src="${IMG}${path}" alt="${title}" loading="lazy" />`;
+    if (path) return `<img src="${IMG}${path}" alt="${esc(title)}" loading="lazy" />`;
     return `<div class="no-poster">No Image</div>`;
   }
 
@@ -799,7 +865,9 @@
 
   // ── Sort ─────────────────────────────────────────────────────────────────
   function getSortedMovies(movies) {
-    const sorted = [...movies];
+    const sorted = state.genreFilter
+      ? movies.filter(m => (m.genre_ids || []).includes(Number(state.genreFilter)))
+      : [...movies];
     switch (state.sort) {
       case "added-asc":  return sorted;
       case "added-desc": return sorted.reverse();
@@ -811,13 +879,52 @@
     }
   }
 
-  function applySort() {
-    state.sort = document.getElementById("sortSelect").value;
+  function watchlistEmptyMessage() {
+    if (!state.movies.length) return "Your watchlist is empty. Search for movies to add.";
+    if (state.genreFilter) return "No titles match the selected genre.";
+    if (state.filter === "free") return "None of your watchlist titles are available for free.";
+    if (state.filter === "streamable") return "None of your watchlist titles are currently streaming.";
+    return "Your watchlist is empty.";
+  }
+
+  // Single render path for My List: applies the active filter, genre and sort
+  function renderWatchlist() {
     const grid = document.getElementById("watchlistGrid");
     const key = state.filter === "free" ? "free" : "flatrate";
     const base = state.filter === "all" ? state.movies
       : state.movies.filter(m => state.providersCache[m.id]?.[key]?.length > 0);
-    renderMovies(grid, getSortedMovies(base), "watchlist");
+    const result = getSortedMovies(base);
+    document.getElementById("watchlistCount").textContent = result.length;
+    if (!result.length) { showEmpty(grid, watchlistEmptyMessage()); return; }
+    renderMovies(grid, result, "watchlist");
+  }
+
+  function applySort() {
+    state.sort = document.getElementById("sortSelect").value;
+    renderWatchlist();
+  }
+
+  function setGenreFilter() {
+    state.genreFilter = document.getElementById("genreSelect").value;
+    renderWatchlist();
+  }
+
+  function populateGenreSelect() {
+    const genreIds = new Set(state.movies.flatMap(m => m.genre_ids || []));
+    const select = document.getElementById("genreSelect");
+    const current = select.value;
+    select.innerHTML = `<option value="">All Genres</option>`;
+    [...genreIds]
+      .filter(id => state.genres[id])
+      .sort((a, b) => state.genres[a].localeCompare(state.genres[b]))
+      .forEach(id => {
+        const opt = document.createElement("option");
+        opt.value = id;
+        opt.textContent = state.genres[id];
+        if (String(id) === current) opt.selected = true;
+        select.appendChild(opt);
+      });
+    state.genreFilter = select.value;
   }
 
   // ── View toggle ──────────────────────────────────────────────────────────
@@ -828,17 +935,14 @@
     document.getElementById(`${prefix}-list-btn`).classList.toggle("active", view === "list");
 
     if (scope === "watchlist") {
-      const grid = document.getElementById("watchlistGrid");
-      const base = state.filter === "all" ? state.movies
-        : state.movies.filter(m => state.providersCache[m.id]?.[state.filter === "free" ? "free" : "flatrate"]?.length > 0);
-      renderMovies(grid, getSortedMovies(base), "watchlist");
+      renderWatchlist();
     } else if (scope === "adult") {
       const aGrid = document.getElementById("adultGrid");
       if (aGrid.dataset.movies) renderMovies(aGrid, JSON.parse(aGrid.dataset.movies), "adult");
     } else {
       const tGrid = document.getElementById("trendingGrid");
       const sGrid = document.getElementById("searchGrid");
-      if (tGrid.dataset.movies) renderMovies(tGrid, JSON.parse(tGrid.dataset.movies), "search");
+      if (state.trendingMovies.length) renderMovies(tGrid, state.trendingMovies, "search");
       if (sGrid.dataset.movies) renderMovies(sGrid, JSON.parse(sGrid.dataset.movies), "search");
     }
   }
@@ -863,7 +967,7 @@
         <div ${cardClickAttr(movie)}>
           ${posterImg(movie.poster_path, movie.title)}
           <div class="card-body">
-            <div class="card-title">${movie.title}</div>
+            <div class="card-title">${esc(movie.title)}</div>
             <div class="card-year">${(movie.release_date || "").slice(0, 4)}</div>
           </div>
         </div>
@@ -882,7 +986,7 @@
         <div ${cardClickAttr(movie)}>
           ${posterImg(movie.poster_path, movie.title)}
           <div class="card-body">
-            <div class="card-title">${movie.title}</div>
+            <div class="card-title">${esc(movie.title)}</div>
             <div class="card-year">${(movie.release_date || "").slice(0, 4)}</div>
           </div>
         </div>
@@ -901,7 +1005,7 @@
     const year = (movie.release_date || "").slice(0, 4);
     return `
       <div class="list-row" data-id="${movie.id}">
-        <div class="list-title" ${cardClickAttr(movie)}>${movie.title}</div>
+        <div class="list-title" ${cardClickAttr(movie)}>${esc(movie.title)}</div>
         <div class="list-year">${year}</div>
         <button class="list-btn btn-remove" onclick="removeMovie(${movie.id}, this)">Remove</button>
       </div>`;
@@ -912,7 +1016,7 @@
     const inList = state.watchlistIds.has(movie.id);
     return `
       <div class="list-row" data-id="${movie.id}">
-        <div class="list-title" ${cardClickAttr(movie)}>${movie.title}</div>
+        <div class="list-title" ${cardClickAttr(movie)}>${esc(movie.title)}</div>
         <div class="list-year">${year}</div>
         <button class="list-btn btn-add ${inList ? "added" : ""}"
           ${inList ? "disabled" : `onclick="addMovie(${movie.id}, this)"`}>
@@ -922,7 +1026,7 @@
   }
 
   function showEmpty(container, msg) {
-    container.innerHTML = `<div class="empty"><p>${msg}</p></div>`;
+    container.innerHTML = `<div class="empty"><p>${esc(msg)}</p></div>`;
   }
 
   // ── Actions ──────────────────────────────────────────────────────────────
@@ -930,15 +1034,16 @@
     const grid = document.getElementById("watchlistGrid");
     grid.innerHTML = `<div class="loading">Loading...</div>`;
     state.providersCache = {};
+    state.genreFilter = "";
+    document.getElementById("genreSelect").value = "";
     setFilter("all", false);
     try {
       const movies = await fetchWatchlist();
       state.movies = movies;
       movies.forEach(m => state.movieData[m.id] = m);
       state.watchlistIds = new Set(movies.map(m => m.id));
-      document.getElementById("watchlistCount").textContent = movies.length;
-      if (!movies.length) { showEmpty(grid, "Your watchlist is empty. Search for movies to add."); return; }
-      renderMovies(grid, getSortedMovies(movies), "watchlist");
+      populateGenreSelect();
+      renderWatchlist();
     } catch (e) {
       showEmpty(grid, `Error: ${e.message}`);
     }
@@ -952,8 +1057,7 @@
     const grid = document.getElementById("watchlistGrid");
 
     if (filter === "all") {
-      renderMovies(grid, getSortedMovies(state.movies), "watchlist");
-      document.getElementById("watchlistCount").textContent = state.movies.length;
+      renderWatchlist();
       return;
     }
 
@@ -973,14 +1077,23 @@
       }
     }));
 
-    const key = filter === "free" ? "free" : "flatrate";
-    const filtered = state.movies.filter(m => state.providersCache[m.id]?.[key]?.length > 0);
-    const emptyMsg = filter === "free"
-      ? "None of your watchlist titles are available for free."
-      : "None of your watchlist titles are currently streaming.";
-    document.getElementById("watchlistCount").textContent = filtered.length;
-    if (!filtered.length) { showEmpty(grid, emptyMsg); return; }
-    renderMovies(grid, getSortedMovies(filtered), "watchlist");
+    // Ignore a stale response if the user picked another filter while providers loaded
+    if (state.filter !== filter) return;
+    renderWatchlist();
+  }
+
+  // Keep state.movies in sync so My List reflects adds/removes without a refresh
+  function syncWatchlistState(movieId, inList) {
+    if (inList) {
+      state.watchlistIds.add(movieId);
+      const movie = state.movieData[movieId];
+      if (movie && !state.movies.some(m => m.id === movieId)) state.movies.push(movie);
+    } else {
+      state.watchlistIds.delete(movieId);
+      state.movies = state.movies.filter(m => m.id !== movieId);
+    }
+    populateGenreSelect();
+    renderWatchlist();
   }
 
   async function removeMovie(movieId, btn) {
@@ -988,12 +1101,7 @@
     btn.textContent = "...";
     try {
       await setWatchlist(movieId, false);
-      state.watchlistIds.delete(movieId);
-      const card = document.querySelector(`.card[data-id="${movieId}"]`);
-      if (card) card.remove();
-      const remaining = document.querySelectorAll("#watchlistGrid .card").length;
-      document.getElementById("watchlistCount").textContent = remaining;
-      if (!remaining) showEmpty(document.getElementById("watchlistGrid"), "Your watchlist is empty.");
+      syncWatchlistState(movieId, false);
       toast("Removed from watchlist");
     } catch (e) {
       btn.disabled = false;
@@ -1007,7 +1115,7 @@
     btn.textContent = "...";
     try {
       await setWatchlist(movieId, true);
-      state.watchlistIds.add(movieId);
+      syncWatchlistState(movieId, true);
       btn.textContent = "In List";
       btn.classList.add("added");
       btn.onclick = null;
@@ -1019,18 +1127,56 @@
     }
   }
 
-  async function loadTrending() {
+  let trendingSeq = 0; // bumped on every fresh load so stale responses are dropped
+
+  async function loadTrending(append = false) {
     const grid = document.getElementById("trendingGrid");
-    grid.innerHTML = `<div class="loading">Loading...</div>`;
-    try {
-      const data = await api("/trending/movie/week?page=1");
-      const movies = data.results.slice(0, 10);
-      movies.forEach(m => state.movieData[m.id] = m);
-      grid.dataset.movies = JSON.stringify(movies);
-      renderMovies(grid, movies, "search");
-    } catch (e) {
-      grid.innerHTML = "";
+    const loadMoreWrapper = document.getElementById("loadMoreWrapper");
+    const loadMoreBtn = document.getElementById("loadMoreBtn");
+
+    const seq = append ? trendingSeq : ++trendingSeq;
+    if (!append) {
+      state.trendingMovies = [];
+      state.trendingPage = 0;
+      grid.innerHTML = `<div class="loading">Loading...</div>`;
+      loadMoreWrapper.style.display = "none";
+    } else {
+      loadMoreBtn.disabled = true;
+      loadMoreBtn.textContent = "Loading...";
     }
+
+    const page = state.trendingPage + 1;
+    try {
+      const path = state.trendingGenreId
+        ? `/discover/movie?sort_by=popularity.desc&with_genres=${state.trendingGenreId}&page=${page}`
+        : `/trending/movie/week?page=${page}`;
+      const data = await api(path);
+      if (seq !== trendingSeq) return;
+      const movies = data.results;
+      state.trendingPage = page;
+      state.trendingTotalPages = data.total_pages;
+      movies.forEach(m => state.movieData[m.id] = m);
+      state.trendingMovies.push(...movies);
+
+      if (!append) {
+        grid.innerHTML = "";
+      }
+      const isGrid = state.view.search === "grid";
+      grid.className = isGrid ? "grid" : "list";
+      grid.insertAdjacentHTML("beforeend", movies.map(m => isGrid ? renderSearchCard(m) : renderSearchRow(m)).join(""));
+
+      loadMoreWrapper.style.display = page < data.total_pages ? "block" : "none";
+      loadMoreBtn.disabled = false;
+      loadMoreBtn.textContent = "Load 20 More";
+    } catch (e) {
+      if (seq !== trendingSeq) return;
+      if (!append) grid.innerHTML = "";
+      loadMoreWrapper.style.display = "none";
+    }
+  }
+
+  async function loadMoreTrending() {
+    await loadTrending(true);
   }
 
   async function doSearch(query) {
@@ -1056,7 +1202,36 @@
     document.getElementById("searchInput").value = "";
     document.getElementById("searchControls").style.display = "none";
     document.getElementById("trendingSection").style.display = "block";
+    document.getElementById("trendingLabel").textContent = "Trending This Week";
+    document.querySelectorAll("#genreQuickSearch .pill").forEach(p => p.classList.remove("active"));
+    const hadGenre = state.trendingGenreId !== null;
+    state.trendingGenreId = null;
+    if (hadGenre || !state.trendingMovies.length) loadTrending();
     document.getElementById("searchInput").focus();
+  }
+
+  async function browseGenre(genreId, genreName) {
+    // Toggle off if already active
+    const pills = document.querySelectorAll("#genreQuickSearch .pill");
+    const activeBtn = [...pills].find(p => p.classList.contains("active"));
+    const clickedBtn = [...pills].find(p => p.textContent === genreName);
+    if (activeBtn === clickedBtn) {
+      clickedBtn.classList.remove("active");
+      document.getElementById("trendingLabel").textContent = "Trending This Week";
+      state.trendingGenreId = null;
+      await loadTrending(false);
+      return;
+    }
+    pills.forEach(p => p.classList.remove("active"));
+    clickedBtn.classList.add("active");
+
+    document.getElementById("trendingLabel").textContent = `Trending in ${genreName}`;
+    document.getElementById("searchGrid").innerHTML = "";
+    document.getElementById("searchControls").style.display = "none";
+    document.getElementById("trendingSection").style.display = "block";
+    document.getElementById("searchInput").value = "";
+    state.trendingGenreId = genreId;
+    await loadTrending(false);
   }
 
   // ── Modal ────────────────────────────────────────────────────────────────
@@ -1076,15 +1251,7 @@
     const inList = state.watchlistIds.has(movieId);
     try {
       await setWatchlist(movieId, !inList);
-      if (inList) {
-        state.watchlistIds.delete(movieId);
-        // Remove card from watchlist grid if present
-        document.querySelector(`#watchlistGrid .card[data-id="${movieId}"], #watchlistGrid .list-row[data-id="${movieId}"]`)?.remove();
-        state.movies = state.movies.filter(m => m.id !== movieId);
-        document.getElementById("watchlistCount").textContent = state.movies.length;
-      } else {
-        state.watchlistIds.add(movieId);
-      }
+      syncWatchlistState(movieId, !inList);
       toast(inList ? "Removed from watchlist" : "Added to watchlist");
     } catch (e) {
       toast(`Error: ${e.message}`);
@@ -1101,8 +1268,8 @@
       <div style="display:flex;flex-direction:column;gap:4px">
         ${cast.map(a => `
           <div style="display:flex;justify-content:space-between;font-size:13px">
-            <span style="font-weight:600">${a.name}</span>
-            <span style="color:var(--muted)">${a.character || ""}</span>
+            <span style="font-weight:600">${esc(a.name)}</span>
+            <span style="color:var(--muted)">${esc(a.character)}</span>
           </div>`).join("")}
       </div>`;
   }
@@ -1126,10 +1293,10 @@
       return `
         <div class="provider" style="${mine ? "opacity:1" : "opacity:0.45"}">
           <div style="position:relative;display:inline-block">
-            <img src="https://image.tmdb.org/t/p/w92${p.logo_path}" alt="${p.provider_name}" />
+            <img src="https://image.tmdb.org/t/p/w92${p.logo_path}" alt="${esc(p.provider_name)}" />
             ${mine ? `<span style="position:absolute;bottom:-3px;right:-3px;background:#4caf50;border-radius:50%;width:14px;height:14px;font-size:9px;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700">✓</span>` : ""}
           </div>
-          <span>${p.provider_name}</span>
+          <span>${esc(p.provider_name)}</span>
         </div>`;
     }
 
@@ -1167,10 +1334,10 @@
     document.getElementById("modalRating").textContent = rating;
     document.getElementById("modalCert").textContent = "";
     document.getElementById("modalGenres").innerHTML = genres.map(g =>
-      `<span style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;font-size:11px;padding:2px 7px;color:var(--muted)">${g}</span>`
+      `<span style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;font-size:11px;padding:2px 7px;color:var(--muted)">${esc(g)}</span>`
     ).join("");
     document.getElementById("modalPoster").innerHTML = posterPath
-      ? `<img src="${IMG}${posterPath}" alt="${title}" />`
+      ? `<img src="${IMG}${posterPath}" alt="${esc(title)}" />`
       : "";
     document.getElementById("modalOverview").textContent = overview;
     const query = encodeURIComponent(title + " " + year + " film");
@@ -1185,9 +1352,10 @@
     overlay.style.display = "flex";
 
     // Use cached providers if available
-    if (state.providersCache[movieId]) {
+    // Entries written by the Stream/Free filter have no cast or certification, so refetch those
+    if (state.providersCache[movieId]?.cast) {
       const { flatrate, free, certification, cast } = state.providersCache[movieId];
-      document.getElementById("modalCert").textContent = certification;
+      document.getElementById("modalCert").textContent = certification || "";
       renderModalCast(cast || []);
       renderModalProviders(providersEl, title, flatrate, free);
       return;
@@ -1221,7 +1389,9 @@
   }
 
   document.addEventListener("keydown", e => {
-    if (e.key === "Escape") document.getElementById("modalOverlay").style.display = "none";
+    if (e.key !== "Escape") return;
+    document.getElementById("modalOverlay").style.display = "none";
+    document.getElementById("pinOverlay").style.display = "none";
   });
 
   // ── Tabs ─────────────────────────────────────────────────────────────────
@@ -1230,7 +1400,8 @@
     document.querySelectorAll("nav button").forEach(b => b.classList.remove("active"));
     document.getElementById(`tab-${name}`).classList.add("active");
     document.querySelector(`nav button[data-tab="${name}"]`)?.classList.add("active");
-    if (name === "search") loadTrending();
+    // Only fetch on first visit; reloading here would reset "Load More" progress
+    if (name === "search" && !state.trendingMovies.length) loadTrending();
   }
 
   // ── Toast ────────────────────────────────────────────────────────────────
@@ -1258,13 +1429,12 @@
 
   document.getElementById("refreshBtn").addEventListener("click", loadWatchlist);
 
-  // Load genre list once
+  // Load genre list first, then watchlist so genres are ready for the dropdown
   api("/genre/movie/list").then(data => {
     data.genres.forEach(g => state.genres[g.id] = g.name);
-  }).catch(() => {});
+  }).catch(() => {}).finally(() => loadWatchlist());
 
   if (!ADULT_PIN) document.getElementById("adultBtn").style.display = "none";
-  loadWatchlist();
 </script>
 </body>
 </html>

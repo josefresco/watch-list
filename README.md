@@ -11,7 +11,8 @@ Watch List is a fast, privacy-focused Progressive Web App for tracking movies yo
 - 📺 **Streaming Info** — See which services are streaming each title
 - 📱 **PWA Support** — Install on any device as a native app
 - 🌙 **Dark Theme** — Easy on the eyes with a modern dark interface
-- 🎲 **Random Pick** — Can't decide? Get a random suggestion from your watchlist
+- 🎲 **Random Pick** — Can't decide? Get a random well-rated title that is currently streaming
+- 🎭 **Genre Browsing** — Filter your watchlist by genre, or browse popular titles in any genre
 - 📋 **Multiple Views** — Grid and list view options for browsing
 
 ## Prerequisites
